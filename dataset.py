@@ -187,6 +187,7 @@ if __name__ == "__main__":
 
     df = []
     for window_transform, (x, y) in td:
+        #### do ml stuff
         ll = td.pixel_to_latlong(window_transform, y["boxes"])
         df.extend(ll.values[:,0].tolist())
     gdf = gpd.GeoDataFrame(geometry=df, crs=ds.crs)
