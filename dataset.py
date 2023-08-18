@@ -8,6 +8,7 @@ from pathlib import Path
 from torch.utils.data import Dataset
 import torch
 from PIL import Image
+from torchvision.transforms.functional import pil_to_tensor, convert_image_dtype
 
 def test_paths():
     tif = "/home/aerotract/software/DroneDataset/data/potlach101/101ShanghaiKnight_Orthomosaic_export_TueJul18150704535595.tif"
@@ -16,24 +17,34 @@ def test_paths():
     return tif, aoi, points
 
 class AeroDataset:
+    ''' dataset for geotiff images + geojson labels '''
 
     def __init__(self, tif_path, aoi_path=None, label_path=None, **kw):
+        # path to input image, assume this is cropped to an aoi
         self.tif_path = tif_path
+        # assuming the tif is already cropped, it becomes our source image
         self.src_img_path = tif_path
+        # record the aoi and label paths (if given)
         self.aoi_path = aoi_path
         self.label_path = label_path
-        self.aoi_path = aoi_path
+        # we're given an aoi path, so this image is not cropped
         if self.aoi_path is not None:
+            # crop the image and record the cropped path
             self.cropped_path = self.crop_image_to_file()
+            # this cropped path becomes the source image
             self.src_img_path = self.cropped_path
+        # record keyword args
         self.kw = kw
 
     @property
     def crs(self):
+        # quick property to access our source image crs
         with rasterio.open(self.src_img_path) as src:
             return src.crs
 
     def crop_image_to_file(self):
+        # use the given aoi to crop our tif and save it to a file in the
+        # same directory as the tif with a new name
         tif_path = Path(self.src_img_path)
         aoi_path = Path(self.aoi_path)
         crop_path = tif_path.with_stem(tif_path.stem + "_" + aoi_path.stem)
@@ -52,6 +63,7 @@ class AeroDataset:
         return crop_path
     
     def window_pixel_to_latlong(self, window):
+        # convert a windows pixel coords to lat/long
         with rasterio.open(self.src_img_path) as src:
             crs = src.crs
             l, b, r, t = src.window_bounds(window)
@@ -60,6 +72,7 @@ class AeroDataset:
         return window_geom
 
     def window_x(self, window):
+        # access the image content within a window, padding if necessary
         with rasterio.open(self.src_img_path) as src:
             tile = src.read(window=window)
         width = tile.shape[1]
@@ -72,6 +85,10 @@ class AeroDataset:
         return tile
     
     def window_y(self, window, window_latlong, latlong=False):
+        # access the label polygons within a window
+        # calculate the percent that each polygon overlaps the aoi (1 if completely inside, 0 if outside)
+        #   and filter out results with ratio <= kw.get("containment_ratio")
+        # convert latlong polygons to pixel coords (unless latlong=True)
         labeled_gdf = gpd.read_file(self.label_path)
         tile_box = window_latlong
         crs = self.crs
@@ -103,6 +120,7 @@ class AeroDataset:
         return intersecting_polygons.to_crs(self.crs)
 
     def window_data(self, window, latlong=False):
+        # return the image and labels (if present) for each a given window
         x = self.window_x(window)
         if self.label_path is None:
             return x
@@ -112,10 +130,12 @@ class AeroDataset:
             return x, y
 
     def iter(self, sampler, latlong=False):
+        # generator to yield all window data
         for window, _ in sampler:
             yield self.window_data(window, latlong=latlong)
 
     def plot(self, sampler_cls, **kw):
+        # helper method to visualize generated windows/labels from a given WindowSampler
         for window_data in self.iter(sampler_cls, **kw):
             if self.label_path is None:
                 x = window_data
@@ -136,21 +156,34 @@ class AeroDataset:
             plt.show()
 
 class TorchVisionAeroDataset(Dataset):
+    ''' torchvision-compatible class for AeroDataset+WindowSampler '''
 
-    def __init__(self, aerods, sampler):
+    def __init__(self, aerods, sampler, x_transform=None, y_transform=None):
+        # dataset to iterate over
         self.aerods = aerods
+        # WindowSampler object to sample windows
         self.sampler = sampler
+        # fn to transform images
+        self.x_transform = self._x_transform if x_transform is None else x_transform
+        # fn to transform targets
+        self.y_transform = y_transform
 
-    def reset(self):
-        self.sampler.reset()
+    def _x_transform(self, x):
+        # base transform for images, convert from PIL to float32 tensor
+        x = pil_to_tensor(x)
+        x = convert_image_dtype(x, torch.float32)
+        return x
 
     def __len__(self):
+        # required by Dataset class
         return len(self.sampler)
     
     def process_x(self, x):
+        # process input image from AeroDataset
         return Image.fromarray(x[:,:,:3])
     
     def process_y(self, y, image_id=0):
+        # process input boxes from AeroDataset
         target = {}
         g = y["geometry"]
         target["boxes"] = torch.FloatTensor(g.apply(lambda x: x.bounds).tolist())
@@ -161,13 +194,24 @@ class TorchVisionAeroDataset(Dataset):
         return target
 
     def __getitem__(self, idx):
+        # required by Dataset class, idx is a unique identifier and necessary
+        # intake and process data from AeroDataset
+        # transform and output data in torchvision format
+        # returns window_transform, which is used to reconstruct pixels --> latlong
         window, window_transform = next(self.sampler)
         data = self.aerods.window_data(window)
         if self.aerods.label_path is None:
             return self.process_x(data)
-        return window_transform, (self.process_x(data[0]), self.process_y(data[1], image_id=idx))
+        x = self.process_x(data[0])
+        y = self.process_y(data[1], image_id=idx)
+        if self.x_transform is not None:
+            x = self.x_transform(x)
+        if self.y_transform is not None:
+            y = self.y_transform(y)
+        return window_transform, (x, y)
         
     def pixel_to_latlong(self, window_transform, boxes):
+        # reconstruct boxes from pixels to latlong with respect to a window
         polygons = []
         for box in boxes:
             x0, y0, x1, y1 = box
@@ -176,19 +220,20 @@ class TorchVisionAeroDataset(Dataset):
         latlong_polygons = [Polygon([(window_transform * coord) for coord in polygon.exterior.coords]) for polygon in polygons]
         return gpd.GeoDataFrame(geometry=latlong_polygons, crs=self.aerods.crs)
 
-if __name__ == "__main__":
+def test_ds():
     from samplers import RandomSampler
-
     tif, aoi, points = test_paths()
-    
     ds = AeroDataset(tif, aoi, points)
     sampler = RandomSampler(ds.src_img_path, **{"tile_size": 128, "n": 11})
     td = TorchVisionAeroDataset(ds, sampler)
+    return td
 
+if __name__ == "__main__":
+    td = test_ds()
     df = []
     for window_transform, (x, y) in td:
         #### do ml stuff
         ll = td.pixel_to_latlong(window_transform, y["boxes"])
         df.extend(ll.values[:,0].tolist())
-    gdf = gpd.GeoDataFrame(geometry=df, crs=ds.crs)
+    gdf = gpd.GeoDataFrame(geometry=df, crs=td.aerods.crs)
     gdf.to_file("test.geojson")
