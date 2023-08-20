@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 import torch
 from PIL import Image
 from torchvision.transforms.functional import pil_to_tensor, convert_image_dtype
+import samplers
 
 def test_paths():
     tif = "/home/aerotract/software/DroneDataset/data/potlach101/101ShanghaiKnight_Orthomosaic_export_TueJul18150704535595.tif"
@@ -151,15 +152,17 @@ class DroneDataset:
                 x, y = window_data
             plt.figure()
             plt.imshow(x)
-            if y is not None:
-                for geometry in y['geometry']:
-                    if geometry.geom_type == 'Polygon':
-                        x, y = geometry.exterior.xy
-                        plt.plot(x, y, color='blue')
-                    elif geometry.geom_type == 'MultiPolygon':
-                        for polygon in geometry.geoms:
-                            x, y = polygon.exterior.xy
-                            plt.plot(x, y, color='blue')
+            if y is None:
+                plt.show()
+                return
+            for geometry in y['geometry']:
+                if geometry.geom_type == 'Polygon':
+                    x, y = geometry.exterior.xy
+                    plt.plot(x, y, color='blue')
+                    continue
+                for polygon in geometry.geoms:
+                    x, y = polygon.exterior.xy
+                    plt.plot(x, y, color='blue')
             plt.show()
 
 class TorchVisionDroneDataset(Dataset):
@@ -237,7 +240,6 @@ class TorchVisionDroneDataset(Dataset):
         return wts, xs
         
     def _pixel_to_latlong(self, window_transform, boxes):
-        # reconstruct boxes from pixels to latlong with respect to a window
         polygons = []
         for box in boxes:
             x0, y0, x1, y1 = box
@@ -253,6 +255,19 @@ class TorchVisionDroneDataset(Dataset):
                 out.append(self._pixel_to_latlong(window_transform[i], boxes[i]))
             return out
         return self._pixel_to_latlong(window_transform, boxes)
+    
+    @classmethod
+    def TrainingDataset(cls, tif=None, aoi=None, points=None, sampler="RandomSampler", **kw):
+        ds = DroneDataset(tif, aoi, points)
+        sampler = getattr(samplers, sampler)(ds.src_img_path, **kw)
+        return cls(ds, sampler)
+    
+    @classmethod
+    def PredictionDataset(cls, tif=None, aoi=None, **kw):
+        ds = DroneDataset(tif, aoi)
+        sampler = samplers.StrideSampler(ds.src_img_path, **kw)
+        samplers.StrideSampler.windows_to_file(ds.src_img_path, **kw)
+        return cls(ds, sampler)
 
 def get_sample_dataset(**kw):
     from samplers import RandomSampler

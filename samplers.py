@@ -6,6 +6,7 @@ from rasterio.windows import Window
 from pathlib import Path
 import geopandas as gpd
 from shapely.geometry import box
+import math
 
 ##############
 # base class #
@@ -119,30 +120,42 @@ class StrideSampler(WindowSampler):
 
     def __init__(self, src_img_path, **kw):
         super().__init__(src_img_path, **kw)
-        self.current_row = -self.tile_size // 4
-        self.current_col = -self.tile_size // 4
-        self.overlap = kw.get("overlap", 0)
+        self.overlap = kw.get("overlap", 0.0)
         self.adj_tile_size = self.tile_size * (1 - self.overlap)
+        self.minrow = -self.adj_tile_size // 4
+        self.mincol = -self.adj_tile_size // 4
+        self.current_row = self.minrow
+        self.current_col = self.mincol
         self.n = self.calc_n()
-        print(self.n)
+        self.noise = kw.get("noise", 0.0)
 
     def calc_n(self):
-        # needs work
-        return int((self.height * self.width) / (self.adj_tile_size**2)) + 1
+        ht = math.ceil(self.height / self.adj_tile_size)
+        wt = math.ceil(self.width / self.adj_tile_size)
+        return ht*wt
+    
+    def apply_noise(self, row, col):
+        row_noise_range = int(self.tile_size * self.noise)
+        col_noise_range = int(self.tile_size * self.noise)
+        row += np.random.randint(-row_noise_range, row_noise_range+1)
+        col += np.random.randint(-col_noise_range, col_noise_range+1)
+        row = np.clip(row, self.minrow, self.height - self.adj_tile_size)
+        col = np.clip(col, self.mincol, self.width - self.adj_tile_size)
+        return row, col
 
-    def getnext(self, rc_only=False):
+    def getnext(self):
         cr, cc = self.current_row, self.current_col
         if self.current_col < (self.width - self.adj_tile_size):
             self.current_col += self.adj_tile_size
         else:
-            self.current_col = -self.adj_tile_size // 4
+            self.current_col = self.mincol
             self.current_row += self.adj_tile_size
-        if rc_only:
-            return cr, cc
+        if self.noise is not None and self.noise > 0:
+            cr, cc = self.apply_noise(cr, cc)
         w, wt = self.build_window(cr, cc)
         return [w], [wt]
             
 if __name__ == "__main__":
     from DroneDataset import DroneDataset, test_paths
     ds = DroneDataset(*test_paths())
-    StrideSampler.windows_to_file(ds.src_img_path)
+    StrideSampler.windows_to_file(ds.src_img_path, tile_size=64)
