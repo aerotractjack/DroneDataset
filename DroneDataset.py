@@ -263,6 +263,12 @@ class TorchVisionDroneDataset(Dataset):
         return cls(ds, sampler)
     
     @classmethod
+    def EvalDataset(cls, tif=None, aoi=None, points=None, sampler="StrideSampler", **kw):
+        ds = DroneDataset(tif, aoi, points)
+        sampler = getattr(samplers, sampler)(ds.src_img_path, **kw)
+        return cls(ds, sampler)
+    
+    @classmethod
     def PredictionDataset(cls, tif=None, aoi=None, **kw):
         ds = DroneDataset(tif, aoi)
         sampler = samplers.StrideSampler(ds.src_img_path, **kw)
